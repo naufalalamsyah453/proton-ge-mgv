@@ -1,439 +1,108 @@
-> [!Caution]
->  **Myself (GloriousEggroll) and this project (GE-Proton) are not affiliated with any other websites related to GE-Proton. There is no existing website for GE-Proton other than this GitHub repository.**
+# proton-ge-mgv
 
-> [!Important]
-> **If you have an issue that happens with my GE-Proton build, provided from this repository, that does not happen on Valve's Proton, please do not open a bug report on Valve's bug tracker.**
+> [!CAUTION]
+> **Fan/educational project. Not affiliated with, endorsed by, or supported by Valve (Proton), GloriousEggroll (GE-Proton), Konami, or Kojima Productions.**
 >
-> Instead, open an issue on this repository's issue tracker: https://github.com/GloriousEggroll/proton-ge-custom/issues
->
-> or contact me on Discord about the issue: https://discord.gg/6y3BdzC
+> This is an experimental fork of [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom) customized for **Metal Gear Solid V: The Phantom Pain** (Steam app 287700). Build and use at your own risk.
 
-# GE-Proton
+## What is this?
+
+MGSV: TPP runs very well on Windows but comparatively less stably under Proton. This fork exists to investigate *why* at the code level and to experiment with fixes. Findings so far, from reading Proton's Wine source (`dlls/ntdll/unix/fsync.c`, `esync.c` on the `proton_9.0` branch):
+
+1. **Sync primitives are approximations of Windows semantics.** `fsync.c` contains `simulate_sched_quantum()` — an explicit `usleep(0)` hack whose comment admits futex wakeups are *too fast* compared to Windows scheduler quanta, which "reveals synchronization bugs in some games which happen to work on Windows". Games relying on implicit wake latency (likely including Fox Engine's job system) can race or hitch under Proton.
+2. **Waiter-yield ordering is not Windows-faithful.** `try_yield_to_waiters()` works around the fact that with futexes a *signaling* thread can grab an object before the already-waiting thread — the opposite of Windows wakeup ordering. The workaround is opt-in and per-app.
+3. **esync manual-reset events are knowingly racy.** `esync.c` documents spinlock-protected but still imperfect `SetEvent`/`ResetEvent` interleavings, and `esync_pulse_event()` is explicitly "not really correct".
+4. **Denuvo Anti-Tamper amplifies all of the above.** The 2026 Denuvo obfuscation update added CPU main-thread load (per PCGamingWiki); under Wine that overhead stacks on top of translation-layer costs, showing up as traversal stutter.
+5. **DXVK pipeline compilation and present-path differences** add frame-time spikes and ~1-2 frames of latency vs native D3D11.
+
+## Goals
+
+- [ ] Benchmark MGSV:TPP under stock GE-Proton vs this fork (frame-time graphs, traversal stutter)
+- [ ] A/B test sync backends: `WINEFSYNC=1` (default), `WINEESYNC=1`, and wineserver-native sync
+- [ ] Evaluate `fsync_simulate_sched_quantum` / `fsync_yield_to_waiters` behavior for MGSV's sync patterns (using REA import analysis of `mgsvtpp.exe` to see which Win32 sync APIs Fox Engine actually uses)
+- [ ] DXVK tuning: async pipeline compilation, `DXVK_FRAME_LATENCY` experiments
+- [ ] Patch `mgsvtpp.exe`-specific quirks into protonfixes (per-game profile)
+- [ ] Contribute generic (non-game-specific) sync fixes upstream to Wine/Proton where possible
+
+## What's in here
+
+Everything from upstream GE-Proton:
+
+- Media foundation patches for video playback
+- AMD FSR patches in the fullscreen hack (`WINE_FULLSCREEN_FSR=1`)
+- NVIDIA CUDA support for PhysX and NVAPI
+- protonfixes per-game fix system
+- Upstream Wine + wine-staging patches
+- NTSync enablement when the kernel supports it
+
+Plus, planned for this fork:
+
+- MGSV:TPP-specific protonfixes profile (env defaults, Denuvo-friendly settings)
+- Experimental fsync/esync scheduling patches, togglable via environment variables
+- DXVK config defaults tuned for TPP's traversal stutter
 
 > [!Warning]
-> **Running non-Steam games with GE-Proton outside of Steam is only supported using [umu](https://github.com/Open-Wine-Components/umu-launcher):**
-> 
-> Proton runs in a container, which uses a runtime environment and libraries specifically built for use within that container. Not running it as intended results in the container and therefore its runtime not being used, which severely breaks library compatibility. It causes Wine to attempt to search for libraries on your system instead of those it was built with or intended for use with Proton. It may work if enough libraries match, but it is not the expected environment and not supported due to library differences across Linux distributions.
-> 
-> If you want Proton functionality outside of Steam, umu-launcher is a command-line tool that was designed to be able to mimic Steam in running the entire containerized runtime environment it needs in order to run Proton exactly as Steam does without needing Steam. Any other method is not supported.
->
->[Heroic](https://heroicgameslauncher.com/) has also enabled umu by default when using `GE-Proton`.
->
->[Lutris](https://lutris.net/) has integrated umu as the default backend used when `GE-Proton (Latest)` is selected as a Wine runner either globally or for any specific game.
-
-> [!Note]
-> (1) Please note, this is a custom build of Proton, and is not affiliated with Valve's Proton.
-> 
-> (2) Please also note I will not assist with unofficial builds of GE-Proton. The only version of GE-Proton that I provide and will assist with builds of is the one provided within this repository, using the build system documented here.
-> 
-> (3) I cannot validate the accuracy or functionality of other builds that have not been built using the build system included here.
+> **Running Proton outside of Steam is only supported using [umu](https://github.com/Open-Wine-Components/umu-launcher).** Proton runs in a container with a runtime specifically built for it; bypassing that breaks library compatibility. [Heroic](https://heroicgameslauncher.com/) and [Lutris](https://lutris.net/) integrate umu by default.
 
 ## Table of contents
 
-- [Overview](#overview)
-	- [Notes](#notes)
+- [What is this?](#what-is-this)
+- [Goals](#goals)
 - [Installation](#installation)
 	- [Native](#native)
-	- [Flatpak](#flatpak)
-		- [Flathub](#flathub)
-		- [Manual](#manual)
 - [Building](#building)
+- [MGSV:TPP experiment matrix](#mgsvtpp-experiment-matrix)
 - [Enabling](#enabling)
 - [Options](#options)
 - [Credits](#credits)
-	- [TKG (Etienne Juvigny)](#tkg-etienne-juvigny)
-	- [Guy1524 (Derek Lesho)](#guy1524-derek-lesho)
-	- [Joshie (Joshua Ashton)](#joshie-joshua-ashton)
-	- [doitsujin/ドイツ人 (Philip Rebohle)](#doitsujinドイツ人-philip-rebohle)
-	- [HansKristian/themaister (Hans-Kristian Arntzen)](#hanskristianthemaister-hans-kristian-arntzen)
-	- [flibitijibibo (Ethan Lee)](#flibitijibibo-ethan-lee)
-	- [simmons-public (Chris Simmons)](#simmons-public-chris-simmons)
-	- [wine-staging maintainers](#wine-staging-maintainers)
-	- [Reporters](#reporters)
-	- [Patrons](#patrons)
-- [Donations](#donations)
-- [Tested Games](#tested-games)
-
-## Overview
-
-This is my build of Proton with the most recent bleeding-edge Proton Experimental Wine.
-
-Things it contains that Valve's Proton currently does not:
-
-- Additional media foundation patches for better video playback support
-- AMD FSR patches added directly to fullscreen hack that can be toggled with WINE_FULLSCREEN_FSR=1
-- FSR fake resolution patch details [here](https://github.com/GloriousEggroll/proton-ge-custom/pull/52)
-- NVIDIA CUDA support for PhysX and NVAPI
-- 'protonfixes' system -- this is an automated system that applies per-game fixes (such as winetricks changes, environment variables, Easy Anti-Cheat workarounds, overrides, etc)
-- Various upstream Wine patches backported
-- Various wine-staging patches applied as they become needed
-- NTSync enablement if the kernel supports it.
-
-## Notes
-
-- Warframe is problematic with VSync. Turn it off or on in game, do not set to `Auto`
-- Warframe should have a frame limit set in the game. An unlimited framerate may cause slowdowns
-- Warframe on NVIDIA: you may need to disable GPU particles in game otherwise the game can freeze randomly. On AMD they should work fine.
-
-Full patches can be viewed in [protonprep-valve-staging.sh](patches/protonprep-valve-staging.sh).
+- [Disclaimer](#disclaimer)
 
 ## Installation
 
-You must have the proper Vulkan drivers and packages installed on your system. VKD3D on AMD requires Mesa 22.0.0 or higher for the VK_KHR_dynamic_rendering extension. Check [here](https://github.com/lutris/docs/blob/master/InstallingDrivers.md) for general driver installation guidance.
+This fork has no prebuilt releases. Build it yourself (see [Building](#building)), then:
 
-### Manual
+1. Create `~/.steam/steam/compatibilitytools.d/` if it does not exist.
+2. Extract the built tarball there:
 
-#### Via [`asdf`, the version manager](https://asdf-vm.com/)
-
-There is an unofficial [plugin for installing and managing GE-Proton versions](https://github.com/augustobmoura/asdf-protonge)
-with [`asdf` (the universal version manager)](https://asdf-vm.com/), it follows
-the same process as the manual installation but makes it a lot easier. Managing
-versions by removing and updating to newer versions also becomes easier.
-
-To install by it first [install `asdf`](https://asdf-vm.com/guide/getting-started.html),
-and then proceed to add the 'asdf-protonge' plugin and install the version you want.
-``` bash
-asdf plugin add protonge
-
-# Or install a version from a tag
-asdf install protonge latest
+```sh
+tar -xf proton-ge-mgv*.tar.gz -C ~/.steam/steam/compatibilitytools.d/
 ```
 
-It's also possible to use the asdf plugin in Flatpak installations, by customizing the target `compatibilitytools.d` path. For more settings check the [plugin's official documentation](https://github.com/augustobmoura/asdf-protonge).
+3. Restart Steam.
+4. Right-click MGSV: TPP in your library → `Properties` → `Compatibility` → check `Force the use of a specific Steam Play compatibility tool` → select `proton-ge-mgv`.
+5. Launch the game.
 
-#### Via [`ProtonPlus`, a proton version manager](https://protonplus.vysp3r.com/)
+You must have working Vulkan drivers. Check [here](https://github.com/lutris/docs/blob/master/InstallingDrivers.md) for driver installation guidance.
 
-ProtonPlus is a GUI Frontend for managing proton versions, including GE-Proton. 
-It is a great tool for those who want a more user-friendly way to manage their proton versions.
+To run non-Steam builds of TPP (or benchmark outside Steam), use [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) — Proton's containerized runtime is required.
 
-To install Proton-GE, Select the `Proton-GE` dropdown, and select the version you want to install, or `Proton-GE Latest` to install the latest version and automatically update it when new versions are released.
+## MGSV:TPP experiment matrix
 
-After every install you need to restart Steam, and [enable proton-ge-custom](#enabling).
+When benchmarking, keep GPU/CPU/driver constant and change one variable at a time. Log frame times with `MANGOHUD=1` (frametime graph + logging enabled in MangoHud config).
 
-#### Native
+| # | Sync backend | Extra env | Expected effect |
+|---|---|---|---|
+| 1 | fsync (default) | — | Baseline |
+| 2 | fsync | `fsync_simulate_sched_quantum=1 fsync_yield_to_waiters=1` | Closer Windows wake latency/ordering; test against job-system hitches |
+| 3 | esync | `WINEESYNC=1` | eventfd-based; known racy manual-reset events — compare hitch pattern |
+| 4 | fsync | `WINE_NTSYNC=1` (kernel ≥ 6.14 + ntsync module) | Kernel-native Windows-style sync; closest semantics |
 
-This section is for those that use the native version of Steam.
+DXVK axis (combine with best sync result):
 
-1. Download a release from the [Releases](https://github.com/GloriousEggroll/proton-ge-custom/releases) page.
-2. Create a `~/.steam/steam/compatibilitytools.d` directory if it does not exist.
-3. Extract the release tarball into `~/.steam/steam/compatibilitytools.d/`.
-   * `tar -xf GE-Proton*.tar.gz -C ~/.steam/steam/compatibilitytools.d/`.
-4. Restart Steam.
-5. [Enable proton-ge-custom in Steam](#enabling).
+| # | DXVK env | Expected effect |
+|---|---|---|
+| a | — | Baseline (frame latency ~2, sync compile) |
+| b | `DXVK_FRAME_LATENCY=1` | Lower input latency, slightly higher CPU cost |
+| c | async-enabled build + `DXVK_ASYNC=1` | Fewer traversal hitches; risk of rare visual glitches |
 
-*Get the latest GE-Proton release through your terminal. It is assumed that you have coreutils and curl installed:*
-```bash
-# Make a temporary working directory
-echo "Making sure temporary directory exists..."
-mkdir -p /tmp/proton-ge-custom
-cd /tmp/proton-ge-custom
-
-steam_dir=~/.steam/steam
-
-# Verify Steam data directory exists
-if [[ ! -d "$steam_dir" ]]; then
-    echo "Error: Steam (native) data directory not found." >&2
-    echo "Please launch Steam at least once to populate it." >&2
-    exit 1
-fi
-
-# Make a Steam compatibility tools folder if it does not exist
-mkdir -p "$steam_dir/compatibilitytools.d"
-
-# Fetch release info
-echo "Fetching release info..."
-release_json=$(curl -s --max-time 10 \
-    https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest)
-
-if [[ -z "$release_json" || "$release_json" != *'"tag_name"'* ]]; then
-    echo "Error: Failed to fetch release info from GitHub." >&2
-    exit 1
-fi
-
-# Resolve release URL for current architecture
-echo "Fetching release for your arch..."
-
-case "$(uname -m)" in
-    aarch64|arm64) tarball_pattern='\-aarch64\.tar\.gz$' ;;
-    x86_64)        tarball_pattern='\-x86_64\.tar\.gz$' ;;
-    *)
-        echo "Error: Unsupported architecture: $(uname -m)." >&2
-        echo "GE-Proton is only available for x86_64 and aarch64." >&2
-        exit 1
-        ;;
-esac
-
-tarball_url=$(echo "$release_json" |
-    grep browser_download_url |
-    cut -d\" -f4 |
-    grep -E "$tarball_pattern" |
-    head -n1 || true)
-
-tarball_name=$(basename "$tarball_url")
-release_name=${tarball_name%.tar.gz}
-
-if [[ -z "$tarball_url" ]]; then
-    echo "Error: Could not find a matching release for your arch ($(uname -m))." >&2
-    exit 1
-fi
-
-# Skip if already installed
-if [[ -d "$steam_dir/compatibilitytools.d/$release_name" ]]; then
-    echo "Latest release $release_name is already installed."
-    exit 0
-fi
-
-# Resolve checksum URL
-checksum_url=$(echo "$release_json" |
-    grep browser_download_url |
-    cut -d\" -f4 |
-    grep "$release_name.sha512sum$" || true)
-
-if [[ -z "$checksum_url" ]]; then
-    echo "Error: Could not find a checksum for $tarball_name in the release." >&2
-    exit 1
-fi
-
-# Use cached tarball from tmp if valid, resume if incomplete
-if [[ -f "$tarball_name" ]]; then
-    echo "Found cached release: $release_name"
-    echo "Verifying download..."
-
-    if curl -sL "$checksum_url" | sha512sum -c - &>/dev/null; then
-        echo "Cached release OK, skipping download."
-    else
-        echo "Cached release is incomplete, resuming download..."
-        curl -C - -L "$tarball_url" -o "$tarball_name" --progress-bar
-        echo "Verifying download..."
-
-        if ! curl -sL "$checksum_url" | sha512sum -c - &>/dev/null; then
-            echo "Resumed download corrupt, falling back to fresh download..."
-            rm -f "$tarball_name"
-            curl -L "$tarball_url" -o "$tarball_name" --progress-bar
-            echo "Verifying download..."
-
-            if ! curl -sL "$checksum_url" | sha512sum -c -; then
-                echo "Error: Verification failed! The downloaded release may be corrupt." >&2
-                exit 1
-            fi
-        fi
-    fi
-
-# Nuke the temporary working directory and download the tarball
-else
-    echo "Cleaning temporary directory..."
-    rm -rf /tmp/proton-ge-custom
-    mkdir /tmp/proton-ge-custom
-    cd /tmp/proton-ge-custom
-    echo "Downloading release: $release_name..."
-    curl -L "$tarball_url" -o "$tarball_name" --progress-bar
-    echo "Verifying download..."
-
-    if ! curl -sL "$checksum_url" | sha512sum -c -; then
-        echo "Error: Verification failed! The downloaded release may be corrupt." >&2
-        exit 1
-    fi
-fi
-
-# Extract the GE-Proton tarball to the Steam compatibility tools folder
-echo "Extracting $tarball_name to the Steam compatibility tools folder..."
-tar -xf "$tarball_name" -C "$steam_dir/compatibilitytools.d/" \
-    || { echo "Error: Extraction failed!" >&2; exit 1; }
-
-echo "Done :)"
-```
-
-The shell commands above can be run as a script by pasting the commands in a file and adding the following to the top of the file assuming you have 'bash' installed:
-```bash
-#!/bin/bash
-set -euo pipefail
-trap 'echo "Error" >&2' ERR
-```
-
-Save the file and make the script executable by adding the executable bit:
-```bash
-chmod +x file.sh
-```
-
-#### Flatpak
-
-This section is for those that use the Steam Flatpak.
-
-##### Flathub
-
-The Steam Flatpak and [the unofficial build of GE-Proton provided by Flathub](https://github.com/flathub/com.valvesoftware.Steam.CompatibilityTool.Proton-GE) are not supported by GloriousEggroll nor Valve and were not tested with all possible games and cases. They can behave differently from the upstream builds. Use at your own risk.
-
-1. [Add the Flathub repository](https://flatpak.org/setup/).
-2. Run:
-	```bash
-	flatpak install com.valvesoftware.Steam.CompatibilityTool.Proton-GE
-	```
-3. [Enable proton-ge-custom in Steam](#enabling).
-
-##### Manual
-
-1. Download a release from the [Releases](https://github.com/GloriousEggroll/proton-ge-custom/releases) page.
-2. Create a Steam compatibility tools directory at `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/` if it does not exist.
-3. Extract the release tarball into `~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`.
-   * `tar -xf GE-ProtonVERSION.tar.gz -C ~/.var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d/`
-4. Restart Steam.
-5. [Enable proton-ge-custom in Steam](#enabling).   
-
-*Get the latest GE-Proton release through your terminal. It is assumed that you have coreutils and curl installed:*
-```bash
-# Make a temporary working directory
-echo "Making sure temporary directory exists..."
-mkdir -p /tmp/proton-ge-custom
-cd /tmp/proton-ge-custom
-
-steam_dir=~/.var/app/com.valvesoftware.Steam/data/Steam
-
-# Verify Steam data directory exists
-if [[ ! -d "$steam_dir" ]]; then
-    echo "Error: Steam (flatpak) data directory not found." >&2
-    echo "Please launch Steam at least once to populate it." >&2
-    exit 1
-fi
-
-# Make a Steam compatibility tools folder if it does not exist
-mkdir -p "$steam_dir/compatibilitytools.d"
-
-# Fetch release info
-echo "Fetching release info..."
-release_json=$(curl -s --max-time 10 \
-    https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest)
-
-if [[ -z "$release_json" || "$release_json" != *'"tag_name"'* ]]; then
-    echo "Error: Failed to fetch release info from GitHub." >&2
-    exit 1
-fi
-
-# Resolve release URL for current architecture
-echo "Fetching release for your arch..."
-
-case "$(uname -m)" in
-    aarch64|arm64) tarball_pattern='-aarch64\.tar\.gz$' ;;
-    x86_64)        tarball_pattern='\-x86_64\.tar\.gz$' ;;
-    *)
-        echo "Error: Unsupported architecture: $(uname -m)." >&2
-        echo "GE-Proton is only available for x86_64 and aarch64." >&2
-        exit 1
-        ;;
-esac
-
-tarball_url=$(echo "$release_json" |
-    grep browser_download_url |
-    cut -d\" -f4 |
-    grep -E "$tarball_pattern" |
-    head -n1 || true)
-
-tarball_name=$(basename "$tarball_url")
-release_name=${tarball_name%.tar.gz}
-
-if [[ -z "$tarball_url" ]]; then
-    echo "Error: Could not find a matching release for your arch ($(uname -m))." >&2
-    exit 1
-fi
-
-# Skip if already installed
-if [[ -d "$steam_dir/compatibilitytools.d/$release_name" ]]; then
-    echo "Latest release $release_name is already installed."
-    exit 0
-fi
-
-# Resolve checksum URL
-checksum_url=$(echo "$release_json" |
-    grep browser_download_url |
-    cut -d\" -f4 |
-    grep "$release_name.sha512sum$" || true)
-
-if [[ -z "$checksum_url" ]]; then
-    echo "Error: Could not find a checksum for $tarball_name in the release." >&2
-    exit 1
-fi
-
-# Use cached tarball from tmp if valid, resume if incomplete
-if [[ -f "$tarball_name" ]]; then
-    echo "Found cached release: $release_name"
-    echo "Verifying download..."
-
-    if curl -sL "$checksum_url" | sha512sum -c - &>/dev/null; then
-        echo "Cached release OK, skipping download."
-    else
-        echo "Cached release is incomplete, resuming download..."
-        curl -C - -L "$tarball_url" -o "$tarball_name" --progress-bar
-        echo "Verifying download..."
-
-        if ! curl -sL "$checksum_url" | sha512sum -c - &>/dev/null; then
-            echo "Resumed download corrupt, falling back to fresh download..."
-            rm -f "$tarball_name"
-            curl -L "$tarball_url" -o "$tarball_name" --progress-bar
-            echo "Verifying download..."
-
-            if ! curl -sL "$checksum_url" | sha512sum -c -; then
-                echo "Error: Verification failed! The downloaded release may be corrupt." >&2
-                exit 1
-            fi
-        fi
-    fi
-
-# Nuke the temporary working directory and download the tarball
-else
-    echo "Cleaning temporary directory..."
-    rm -rf /tmp/proton-ge-custom
-    mkdir /tmp/proton-ge-custom
-    cd /tmp/proton-ge-custom
-    echo "Downloading release: $release_name..."
-    curl -L "$tarball_url" -o "$tarball_name" --progress-bar
-    echo "Verifying download..."
-
-    if ! curl -sL "$checksum_url" | sha512sum -c -; then
-        echo "Error: Verification failed! The downloaded release may be corrupt." >&2
-        exit 1
-    fi
-fi
-
-# Extract the GE-Proton tarball to the Steam compatibility tools folder
-echo "Extracting $tarball_name to the Steam compatibility tools folder..."
-tar -xf "$tarball_name" -C "$steam_dir/compatibilitytools.d/" \
-    || { echo "Error: Extraction failed!" >&2; exit 1; }
-
-echo "Done :)"
-```
-
-The shell commands above can be run as a script by pasting the commands in a file and adding the following to the top of the file assuming you have 'bash' installed:
-```bash
-#!/bin/bash
-set -euo pipefail
-trap 'echo "Error" >&2' ERR
-```
-
-Save the file and make the script executable by adding the executable bit:
-```bash
-chmod +x file.sh
-```
-
-#### Snap
-
-This section is for those that use the Steam [Snap](https://snapcraft.io/steam).
-
-This unofficial build isn't supported by GloriousEggroll nor Valve and wasn't tested with all possible games and cases. It can behave differently from the upstream builds. Use at your own risk.
-
-##### Manual
-
-1. Download a release from the [Releases](https://github.com/GloriousEggroll/proton-ge-custom/releases) page.
-2. Create a `~/snap/steam/common/.steam/steam/compatibilitytools.d/` directory if it does not exist.
-3. Extract the release tarball into `~/snap/steam/common/.steam/steam/compatibilitytools.d/`.
-   * `tar -xf GE-ProtonVERSION.tar.gz -C ~/snap/steam/common/.steam/steam/compatibilitytools.d/`
-4. Restart Steam.
-5. [Enable proton-ge-custom in Steam](#enabling).
+Reference workload for comparisons: helicopter ride over Afghanistan open world (traversal stress), Mission 22 base defense (particle/Fulton load), Mother Base helicopter pickup (known stutter spot on Windows too).
 
 ## Building
 
 1. Clone this repository by executing:
 
 ```sh
-git clone --recurse-submodules https://github.com/gloriouseggroll/proton-ge-custom
+git clone --recurse-submodules https://github.com/naufalalamsyah453/proton-ge-mgv
 ```
 
 2. Drop any custom patches into patches/, then open patches/protonprep-valve-staging.sh and add a patch line for them under `#WINE CUSTOM PATCHES` in the same way the others are done.
@@ -444,24 +113,24 @@ git clone --recurse-submodules https://github.com/gloriouseggroll/proton-ge-cust
 ./patches/protonprep-valve-staging.sh &> patchlog.txt
 ```
 
-in the main proton-ge-custom directory. Open `patchlog.txt` and search for "fail" to make sure no patch failures occured. An easy way to do this is like so:
+in the main proton-ge-mgv directory. Open `patchlog.txt` and search for "fail" to make sure no patch failures occured. An easy way to do this is like so:
 
 ```sh
 grep -i fail patchlog.txt
 grep -i error patchlog.txt 
 ```
 
-4. Navigate to the parent directory containing the proton-ge-custom folder.
+4. Navigate to the parent directory containing the proton-ge-mgv folder.
 
 5. Type the following:
 
 ```sh
 mkdir build && cd build
-../configure.sh --build-name=SOME-BUILD-NAME-HERE
+../configure.sh --build-name=proton-ge-mgv-1.0
 make redist &> log
 ```
 
-The build will be placed within the build directory as SOME-BUILD-NAME-HERE.tar.gz.
+The build will be placed within the build directory as `proton-ge-mgv-1.0.tar.gz`.
 
 ## Enabling
 
@@ -760,6 +429,15 @@ https://www.patreon.com/gloriouseggroll
 
 
 ## Tested games
+
+The table below is inherited from upstream GE-Proton (GE-Proton compatibility, not specific to this fork). Results for proton-ge-mgv + MGSV:TPP experiments will be recorded in the [issues](../../issues) tracker.
+
+## Disclaimer
+
+- This is an unofficial, personal research fork. It is not affiliated with or endorsed by Valve, GloriousEggroll, Konami, or Kojima Productions.
+- You own a legal copy of MGSV: TPP required to use this with the game; this repo contains no game code, no Wine/DXVK code of its own yet, and no circumvention of DRM.
+- Builds from this repository are provided as-is, with no warranty. Report issues on this fork's issue tracker, not on Valve's or GE-Proton's trackers.
+- Upstream GE-Proton license and credits apply; see [Credits](#credits).
 
 | Name                                                | SteamDB link                                 | ProtonDB link                               | Steambase                                   | Has protonfixes    | Has Media Foundation fixes |
 | --------------------------------------------------- | -------------------------------------------- | -------------------------------------------- | -------------------------------------------- | ------------------ | -------------------------- |
